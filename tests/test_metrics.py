@@ -1,89 +1,23 @@
-from claims import claims_from_output_value
 from metrics import calculate_field_metrics, calculate_transcript_metrics
-from models import ClaimDecision, EvaluationEvidence, FieldMetrics, SourceFactDecision
+from models import ClaimDecision, EvaluationEvidence, SourceFactDecision
 
+def decision(claim_id: str, *, supported=True, correct_field=True, entity_correct=True, contradiction=False):
+    return ClaimDecision(claim_id=claim_id, claim=claim_id, supported=supported, correct_field=correct_field, entity_correct=entity_correct, contradiction=contradiction, matched_source_fact_ids=["f:source:0"] if supported else [])
 
-def test_output_values_become_claim_json_first():
-    claims = claims_from_output_value("medical_conditions", ["Diabetes", "Asthma"])
-    assert [c.claim for c in claims] == ["Diabetes", "Asthma"]
+def test_no_claims_no_facts_is_not_applicable_not_perfect():
+    m = calculate_field_metrics(EvaluationEvidence(field="f", output_value=""))
+    assert m.faithfulness is None and m.coverage is None and m.status == "NOT_APPLICABLE"
 
+def test_empty_output_with_source_facts_fails_with_zero_coverage():
+    m = calculate_field_metrics(EvaluationEvidence(field="f", output_value="", source_facts=[SourceFactDecision(fact_id="f:source:0", fact="Diabetes", captured=False)]))
+    assert m.coverage == 0.0 and m.status == "FAIL"
 
-def test_metrics_are_derived_from_boolean_evidence():
-    evidence = EvaluationEvidence(
-        field="medical_conditions",
-        output_value=["Diabetes", "Hypertension"],
-        output_claims=[
-            ClaimDecision(
-                claim_id="medical_conditions:0",
-                claim="Diabetes",
-                supported=True,
-                correct_field=True,
-                entity_correct=True,
-                contradiction=False,
-                evidence_questions=[22],
-            ),
-            ClaimDecision(
-                claim_id="medical_conditions:1",
-                claim="Hypertension",
-                supported=False,
-                correct_field=True,
-                entity_correct=True,
-                contradiction=False,
-                evidence_questions=[],
-            ),
-        ],
-        source_facts=[
-            SourceFactDecision(
-                fact_id="medical_conditions:source:0",
-                fact="Diabetes",
-                captured=True,
-                evidence_questions=[22],
-            ),
-            SourceFactDecision(
-                fact_id="medical_conditions:source:1",
-                fact="Asthma",
-                captured=False,
-                evidence_questions=[37],
-            ),
-        ],
-        issues=["Hypertension unsupported; asthma omitted."],
-    )
+def test_critical_defect_is_hard_fail_without_fake_threshold_logic():
+    m = calculate_field_metrics(EvaluationEvidence(field="f", output_value=["A","B"], output_claims=[decision("f:0"), decision("f:1", supported=False)], source_facts=[SourceFactDecision(fact_id="f:source:0", fact="A", captured=True)]))
+    assert m.faithfulness == 0.5 and m.hallucinations == 1 and m.status == "FAIL"
 
-    result = calculate_field_metrics(evidence)
-
-    assert result.faithfulness == 0.5
-    assert result.coverage == 0.5
-    assert result.field_alignment == 1.0
-    assert result.entity_attribution == 1.0
-    assert result.hallucinations == 1
-    assert result.status == "FAIL"
-
-
-def test_transcript_metrics_are_deterministic():
-    fields = [
-        FieldMetrics(
-            field="reason_for_claim",
-            faithfulness=1.0,
-            coverage=1.0,
-            field_alignment=1.0,
-            entity_attribution=1.0,
-            hallucinations=0,
-            contradictions=0,
-            status="PASS",
-        ),
-        FieldMetrics(
-            field="medical_conditions",
-            faithfulness=1.0,
-            coverage=0.8,
-            field_alignment=1.0,
-            entity_attribution=1.0,
-            hallucinations=0,
-            contradictions=0,
-            status="WARN",
-        ),
-    ]
-
-    result = calculate_transcript_metrics(fields)
-    assert result.overall_coverage == 0.9
-    assert result.overall_score == 0.975
-    assert result.status == "WARN"
+def test_transcript_ignores_not_applicable_values_in_averages():
+    applicable = calculate_field_metrics(EvaluationEvidence(field="a", output_value=["A"], output_claims=[decision("a:0")], source_facts=[SourceFactDecision(fact_id="f:source:0", fact="A", captured=True)]))
+    na = calculate_field_metrics(EvaluationEvidence(field="b", output_value=""))
+    t = calculate_transcript_metrics([applicable, na])
+    assert t.overall_faithfulness == 1.0 and t.status == "PASS"

@@ -1,72 +1,66 @@
+"""DSPy semantic components.
+
+Lazy initialization lets deterministic tests run without an API key or DSPy runtime.
+"""
 import json
-import os
-import dspy
+from typing import Protocol
+from config import FIELD_DEFINITIONS, JUDGE_MODEL
+from models import ClaimDecision, EvaluationEvidence, OutputClaim, SourceFact, SourceFactDecision
 
-from config import FIELD_DEFINITIONS
-from models import EvaluationEvidence, OutputClaim
+class SemanticJudge(Protocol):
+    def decompose(self, field: str, value: str) -> list[OutputClaim]: ...
+    def inventory_source_facts(self, source: dict, field: str) -> list[SourceFact]: ...
+    def verify(self, source: dict, field: str, value, claims: list[OutputClaim], source_facts: list[SourceFact]) -> EvaluationEvidence: ...
 
+def _dspy():
+    import dspy
+    dspy.configure(lm=dspy.LM(JUDGE_MODEL))
+    return dspy
 
-MODEL_NAME = os.getenv("JUDGE_MODEL", "openai/gpt-5.6")
-dspy.configure(lm=dspy.LM(MODEL_NAME))
+class DspySemanticJudge:
+    def __init__(self) -> None:
+        dspy = _dspy()
+        class NarrativeClaimDecomposition(dspy.Signature):
+            """Split one existing narrative output value into atomic semantic claims. Preserve meaning; do not add, correct, or infer information."""
+            field_name: str = dspy.InputField()
+            field_definition: str = dspy.InputField()
+            actual_field_value: str = dspy.InputField()
+            claims: list[OutputClaim] = dspy.OutputField()
+        class SourceFactInventory(dspy.Signature):
+            """Identify material source facts for one destination field from the ENTIRE source interview. Do not inspect production output."""
+            source_json: str = dspy.InputField()
+            field_name: str = dspy.InputField()
+            field_definition: str = dspy.InputField()
+            facts: list[SourceFact] = dspy.OutputField()
+        class EvidenceVerification(dspy.Signature):
+            """Verify fixed output claims against a fixed source-fact inventory. Return exactly one decision per supplied claim/fact and do not rewrite IDs or text."""
+            source_json: str = dspy.InputField()
+            field_name: str = dspy.InputField()
+            field_definition: str = dspy.InputField()
+            actual_field_value_json: str = dspy.InputField()
+            output_claims_json: str = dspy.InputField()
+            source_facts_json: str = dspy.InputField()
+            claim_decisions: list[ClaimDecision] = dspy.OutputField()
+            fact_decisions: list[SourceFactDecision] = dspy.OutputField()
+            issues: list[str] = dspy.OutputField()
+        self._decomposer = dspy.Predict(NarrativeClaimDecomposition)
+        self._inventory = dspy.Predict(SourceFactInventory)
+        self._verifier = dspy.Predict(EvidenceVerification)
 
+    def decompose(self, field: str, value: str) -> list[OutputClaim]:
+        return self._decomposer(field_name=field, field_definition=FIELD_DEFINITIONS.get(field, field), actual_field_value=value).claims
 
-class FieldEvidenceJudge(dspy.Signature):
-    """
-    Produce EVALUATION EVIDENCE for one existing output field.
+    def inventory_source_facts(self, source: dict, field: str) -> list[SourceFact]:
+        response = self._inventory(source_json=json.dumps(source, ensure_ascii=False), field_name=field, field_definition=FIELD_DEFINITIONS.get(field, field))
+        return [SourceFact(fact_id=f"{field}:source:{i}", fact=fact.fact.strip(), evidence_questions=fact.evidence_questions) for i, fact in enumerate(response.facts) if fact.fact.strip()]
 
-    Inputs:
-    - entire source interview JSON
-    - destination field name and definition
-    - actual output field value
-    - claim objects created from that exact output value
-
-    Evaluation only:
-    - do not correct the field
-    - do not regenerate extraction
-    - do not create replacement output
-    - do not assign decimal quality scores
-
-    For every supplied output claim decide:
-      supported: true/false
-      correct_field: true/false
-      entity_correct: true/false
-      contradiction: true/false
-      evidence_questions: source question numbers
-
-    Then inspect the ENTIRE source interview and identify material source facts
-    relevant to this field. For every source fact decide:
-      captured: true/false
-      evidence_questions: source question numbers
-
-    Relevant evidence may appear under any question number.
-    """
-
-    source_json: str = dspy.InputField()
-    field_name: str = dspy.InputField()
-    field_definition: str = dspy.InputField()
-    actual_field_value_json: str = dspy.InputField()
-    output_claims_json: str = dspy.InputField()
-
-    evidence: EvaluationEvidence = dspy.OutputField()
-
-
-judge = dspy.Predict(FieldEvidenceJudge)
-
-
-def build_evaluation_evidence(
-    source: dict,
-    field_name: str,
-    value,
-    claims: list[OutputClaim],
-) -> EvaluationEvidence:
-    response = judge(
-        source_json=json.dumps(source, ensure_ascii=False),
-        field_name=field_name,
-        field_definition=FIELD_DEFINITIONS.get(field_name, field_name),
-        actual_field_value_json=json.dumps(value, ensure_ascii=False),
-        output_claims_json=json.dumps(
-            [c.model_dump(mode="json") for c in claims],
-            ensure_ascii=False,
-        ),
-    )
-    return response.evidence
+    def verify(self, source: dict, field: str, value, claims: list[OutputClaim], source_facts: list[SourceFact]) -> EvaluationEvidence:
+        response = self._verifier(
+            source_json=json.dumps(source, ensure_ascii=False),
+            field_name=field,
+            field_definition=FIELD_DEFINITIONS.get(field, field),
+            actual_field_value_json=json.dumps(value, ensure_ascii=False),
+            output_claims_json=json.dumps([c.model_dump(mode="json") for c in claims], ensure_ascii=False),
+            source_facts_json=json.dumps([f.model_dump(mode="json") for f in source_facts], ensure_ascii=False),
+        )
+        return EvaluationEvidence(field=field, output_value=value, output_claims=response.claim_decisions, source_facts=response.fact_decisions, issues=response.issues)
