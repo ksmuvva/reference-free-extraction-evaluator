@@ -1,45 +1,99 @@
-# Reference-Free Extraction Evaluator
+# Reference-Free Extraction Evaluator v3
 
-Evaluation-only agent for validating an existing structured JSON extraction against the entire source asylum interview Q&A JSON.
+Validation-only framework for comparing an existing structured extraction JSON with the entire source asylum-interview Q&A JSON. It does **not** repair or regenerate production output.
 
-## Three-layer design
+## Architecture
 
-### Layer 1 - Actual production output JSON
-The evaluator starts with the exact structured output produced by the system under test.
+The critical path is deliberately **not agent-orchestrated**. Python owns schema validation, the field loop, contract checks, arithmetic, thresholds, and aggregation. The LLM is limited to semantic work that Python cannot do reliably by rules alone.
 
-### Layer 2 - Evaluation evidence JSON
-Each output field value is first converted into explicit claim objects. DSPy + the LLM judge checks those exact claims against the ENTIRE input Q&A JSON and returns boolean/categorical decisions such as `supported`, `correct_field`, `entity_correct`, `contradiction`, and source evidence question numbers.
+```text
+Actual production output JSON
+        |
+        +--> mandatory schema/type validation (Python)
+        |
+        +--> for each field (Python loop)
+                |
+                +--> atomic output claims
+                |      - list/dict: deterministic
+                |      - narrative text: semantic decomposition
+                |
+                +--> source-fact inventory
+                |      - independent semantic pass over entire source
+                |      - does NOT see production output
+                |
+                +--> evidence verification
+                |      - fixed claims + fixed source facts
+                |      - supported/captured/aligned/entity/contradiction
+                |
+                +--> strict contract reconciliation (Python)
+                |
+                +--> deterministic metrics (Python)
+```
 
-The judge also identifies material source facts relevant to each field and marks each one `captured=true/false`.
+This separates **source-fact discovery** from **output verification**, reducing correlated judge error in coverage measurement.
 
-### Layer 3 - Deterministic metrics
-Python computes:
+## Metrics
 
-- faithfulness = supported output claims / total output claims
-- coverage = captured relevant source facts / total relevant source facts
-- field alignment = correctly placed claims / total output claims
-- entity attribution = correctly attributed claims / total output claims
-- hallucination count
-- contradiction count
+- Faithfulness = supported output claims / output claims
+- Coverage = captured source facts / fixed source-fact inventory
+- Field alignment = correctly placed claims / output claims
+- Entity attribution = correctly attributed claims / output claims
+- Hallucination count = unsupported claims
+- Contradiction count
+- Wrong-entity count
 
-The LLM never directly produces decimal quality scores.
+The arithmetic is deterministic; semantic classifications are LLM-assisted.
 
-## Stack
+### Status policy
 
-- OpenAI Agents SDK: tool-using evaluation agent
-- DSPy + LLM-as-judge: semantic boolean/categorical decisions
-- Python: claim normalisation, arithmetic, thresholds and aggregation
+Critical defects are hard failures:
+- unsupported claim / hallucination
+- contradiction
+- wrong-person/entity attribution
 
-## Run
+Coverage and field alignment are graded using policy thresholds from environment variables. Faithfulness thresholds are intentionally **not** used after a hard hallucination rule, avoiding unreachable/dead scoring logic.
+
+`NOT_APPLICABLE` and `INDETERMINATE` are explicit states. A zero denominator never silently becomes `1.0`.
+
+## Judge safety checks
+
+Python rejects judge responses that:
+- omit or add claims
+- duplicate claim/fact IDs
+- alter claim/fact text
+- omit or add source facts
+- reference unknown source-fact IDs
+- mark a claim supported without linking it to at least one fixed source fact
+
+A contract failure becomes `INDETERMINATE`, not a misleading score.
+
+## Configuration
+
+Copy `.env.example` locally or export variables in your shell. Never commit real API keys.
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e '.[test]'
-export OPENAI_API_KEY=...
-export JUDGE_MODEL=openai/gpt-5.6
+export OPENAI_API_KEY="..."
+export JUDGE_MODEL="openai/gpt-5.6"
+```
+
+The exposed key previously pasted into chat should be revoked and must not be reused.
+
+## Run deterministic tests without an API key
+
+```bash
+python -m pip install -r requirements.lock
 pytest -q
+```
+
+## Run a live evaluation later
+
+```bash
+python -m pip install -e '.[test]'
 python main.py data/source.json data/actual_output.json
 ```
 
-No gold/reference output is required. Therefore the project does not claim formal accuracy, precision, recall, F1, ROUGE, BLEU, or exact match.
+A live run requires `OPENAI_API_KEY` and the configured judge model.
+
+## Interpretation limits
+
+There is no human-labelled gold output, so this project does not claim formal accuracy, precision, recall, F1, ROUGE, BLEU, or exact-match accuracy. Coverage remains a judge-assisted semantic completeness measure even though its arithmetic is deterministic.
