@@ -1,0 +1,11 @@
+{
+  "interview": [
+    {"question_number": 1, "question": "Why are you claiming asylum?", "answer": "I had problems back home."},
+    {"question_number": 17, "question": "What happened after that?", "answer": "People from my former religious group threatened me."},
+    {"question_number": 22, "question": "Do you have health conditions?", "answer": "I have diabetes."},
+    {"question_number": 31, "question": "Tell me about your family.", "answer": "My wife and two children live in India."},
+    {"question_number": 37, "question": "Anything else about your health?", "answer": "I also have asthma."},
+    {"question_number": 39, "question": "Why can you not return?", "answer": "I fear they will harm me because I changed religion."},
+    {"question_number": 40, "question": "Which countries did you travel through?", "answer": "Turkey and France."}
+  ]
+}
